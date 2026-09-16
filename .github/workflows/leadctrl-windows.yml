@@ -7,6 +7,12 @@ on:
     paths:
       - '.github/workflows/leadctrl-windows.yml'
       - 'res/customize_leadctrl.py'
+      - 'res/icon.ico'
+      - 'res/tray-icon.ico'
+      - 'flutter/assets/icon.*'
+      - 'flutter/assets/logo*.png'
+      - 'flutter/windows/runner/resources/app_icon.ico'
+      - 'libs/portable/build.rs'
 
 permissions:
   contents: write
@@ -32,7 +38,7 @@ env:
   FLUTTER_WINDOWS_ARM_VERSION: "3.44.9"
   # for arm64 linux because official Dart SDK does not work
   FLUTTER_ELINUX_VERSION: "3.16.9"
-  TAG_NAME: "leadctrl-windows"
+  TAG_NAME: "leadctrl-branded-windows"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   # vcpkg version: 2026.07.29
   # If we change the `VCPKG COMMIT_ID`, please remember:
@@ -274,6 +280,16 @@ jobs:
               Write-Host "Ingore the printer driver error."
           }
 
+      - name: Verify packaged LeadCtrl branding
+        run: |
+          foreach ($asset in 'icon.png', 'icon.ico', 'logo.png') {
+            $sourceHash = (Get-FileHash "flutter/assets/$asset" -Algorithm SHA256).Hash
+            $bundleHash = (Get-FileHash "rustdesk/data/flutter_assets/assets/$asset" -Algorithm SHA256).Hash
+            if ($sourceHash -ne $bundleHash) {
+              throw "Packaged branding differs from source: $asset"
+            }
+          }
+
       - name: find Runner.res
         # Windows: find Runner.res (compiled from ./flutter/windows/runner/Runner.rc), copy to ./Runner.res
         # Runner.rc does not contain actual version, but Runner.res does
@@ -356,7 +372,7 @@ jobs:
       - name: Upload LeadCtrl installers
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: leadctrl-windows-x86_64-installers
+          name: leadctrl-branded-windows-x86_64-installers
           path: |
             ./SignOutput/rustdesk-*.msi
             ./SignOutput/rustdesk-*.exe

@@ -1,4 +1,7 @@
 fn main() {
+    println!("cargo:rerun-if-changed=../../res/icon.ico");
+    println!("cargo:rerun-if-changed=../../res/manifest.xml");
+    println!("cargo:rerun-if-changed=.");
     #[cfg(windows)]
     {
         use std::io::Write;
