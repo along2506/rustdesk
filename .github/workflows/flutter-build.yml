@@ -165,7 +165,9 @@ jobs:
           s = s.replace('rs-ny.rustdesk.com', 'ops.leadctrl.cn')
           s = s.replace('OeVuKk5nlHiXp/ASvq2TGnExRrJjkqWMHzgNhYZ8KAo=', 'XiV+lwBj46Vb8TMulqF55l5IcOso97krM+k5xd77tA4=')
           open(p, 'w', encoding='utf-8').write(s)
-          PYEOF- name: Restore bridge files
+          PYEOF
+      - name: Restore bridge files
+        uses: actions/download-artifact@...
 
       - name: Customize RustDesk server config
         shell: bash
