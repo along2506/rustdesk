@@ -156,17 +156,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Customize RustDesk server config
-        shell: bash
-        run: |
-          python - <<'PYEOF'
-          p = 'libs/hbb_common/src/config.rs'
-          s = open(p, encoding='utf-8').read()
-          s = s.replace('rs-ny.rustdesk.com', 'ops.leadctrl.cn')
-          s = s.replace('OeVuKk5nlHiXp/ASvq2TGnExRrJjkqWMHzgNhYZ8KAo=', 'XiV+lwBj46Vb8TMulqF55l5IcOso97krM+k5xd77tA4=')
-          open(p, 'w', encoding='utf-8').write(s)
-          PYEOF
-          
       - name: Restore bridge files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

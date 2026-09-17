@@ -2,16 +2,16 @@
 
 import base64
 import argparse
+import os
+import re
 from pathlib import Path
 
-SERVER = "ops.leadctrl.cn"
-PUBLIC_KEY = "XiV+lwBj46Vb8TMulqF55l5IcOso97krM+k5xd77tA4="
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def replace_once(source, old, new):
     if source.count(old) != 1:
-        raise RuntimeError("Upstream source changed; refusing to build an unconfigured client: " + old)
+        raise RuntimeError("Upstream source changed; refusing to build an unconfigured client")
     return source.replace(old, new, 1)
 
 
@@ -24,11 +24,26 @@ def settings_initializer(name, values):
             f'RwLock::new(vec![\n{entries}\n        ].into_iter().collect());')
 
 
+def read_build_config():
+    server = os.environ.get("LEADCTRL_SERVER", "").strip()
+    public_key = os.environ.get("LEADCTRL_PUBLIC_KEY", "").strip()
+    if not server or not public_key:
+        raise ValueError("LEADCTRL_SERVER and LEADCTRL_PUBLIC_KEY are required")
+    if len(server) > 253 or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", server):
+        raise ValueError("LEADCTRL_SERVER must be a hostname or IPv4 address without a port")
+    try:
+        decoded = base64.b64decode(public_key, validate=True)
+    except ValueError:
+        raise ValueError("LEADCTRL_PUBLIC_KEY must be valid Base64") from None
+    if len(decoded) != 32:
+        raise ValueError("LEADCTRL_PUBLIC_KEY must encode 32 bytes")
+    return server, public_key
+
+
 def customize(root=ROOT, edition="full"):
     if edition not in ("full", "lite"):
         raise ValueError("Unknown client edition")
-    if len(base64.b64decode(PUBLIC_KEY, validate=True)) != 32:
-        raise ValueError("Expected a 32-byte server public key")
+    SERVER, PUBLIC_KEY = read_build_config()
 
     config_path = root / "libs/hbb_common/src/config.rs"
     config = config_path.read_text(encoding="utf-8")
@@ -116,4 +131,10 @@ def customize(root=ROOT, edition="full"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--edition", choices=("full", "lite"), default="full")
-    customize(edition=parser.parse_args().edition)
+    parser.add_argument("--validate-only", action="store_true")
+    args = parser.parse_args()
+    if args.validate_only:
+        read_build_config()
+        print("LeadCtrl build configuration validated")
+    else:
+        customize(edition=args.edition)
