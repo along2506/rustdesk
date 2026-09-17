@@ -1,6 +1,7 @@
 """Apply the LeadCtrl client configuration to the checked-out build sources."""
 
 import base64
+import argparse
 from pathlib import Path
 
 SERVER = "ops.leadctrl.cn"
@@ -14,7 +15,18 @@ def replace_once(source, old, new):
     return source.replace(old, new, 1)
 
 
-def customize(root=ROOT):
+def settings_initializer(name, values):
+    entries = '\n'.join(
+        f'            ("{key}".to_owned(), "{value}".to_owned()),'
+        for key, value in values.items()
+    )
+    return (f'pub static ref {name}: RwLock<HashMap<String, String>> = '
+            f'RwLock::new(vec![\n{entries}\n        ].into_iter().collect());')
+
+
+def customize(root=ROOT, edition="full"):
+    if edition not in ("full", "lite"):
+        raise ValueError("Unknown client edition")
     if len(base64.b64decode(PUBLIC_KEY, validate=True)) != 32:
         raise ValueError("Expected a 32-byte server public key")
 
@@ -24,6 +36,28 @@ def customize(root=ROOT):
         config,
         'pub const RENDEZVOUS_SERVERS: &[&str] = &["rs-ny.rustdesk.com"];',
         f'pub const RENDEZVOUS_SERVERS: &[&str] = &["{SERVER}"];',
+    )
+
+    builtin = {
+        "hide-server-settings": "Y",
+        "allow-deep-link-server-settings": "N",
+    }
+    if edition == "lite":
+        builtin.update({key: "Y" for key in (
+            "hide-general-settings", "hide-security-settings",
+            "hide-network-settings", "hide-remote-printer-settings",
+        )})
+        config = replace_once(
+            config,
+            'pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();',
+            settings_initializer("HARD_SETTINGS", {
+                "conn-type": "incoming", "disable-account": "Y", "disable-ab": "Y",
+            }),
+        )
+    config = replace_once(
+        config,
+        'pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = Default::default();',
+        settings_initializer("BUILTIN_SETTINGS", builtin),
     )
     config = replace_once(
         config,
@@ -62,11 +96,24 @@ def customize(root=ROOT):
     })
 }''' % (SERVER, SERVER, PUBLIC_KEY))
 
+    client_path = root / "src/client.rs"
+    client = None
+    if edition == "lite":
+        client = replace_once(
+            client_path.read_text(encoding="utf-8"),
+            'if config::is_incoming_only() && !is_switch_sides_back(conn_type, &interface).await {',
+            'if config::is_incoming_only() {',
+        )
+
     # Write only after every source match has passed.
     config_path.write_text(config, encoding="utf-8")
     windows_path.write_text(windows, encoding="utf-8")
-    print("LeadCtrl ID/relay server and public key embedded and fixed:", SERVER)
+    if client is not None:
+        client_path.write_text(client, encoding="utf-8")
+    print("LeadCtrl configuration embedded and locked; edition:", edition)
 
 
 if __name__ == "__main__":
-    customize()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--edition", choices=("full", "lite"), default="full")
+    customize(edition=parser.parse_args().edition)
