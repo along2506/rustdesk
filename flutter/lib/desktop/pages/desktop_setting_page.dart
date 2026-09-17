@@ -2579,8 +2579,22 @@ class _AboutState extends State<_About> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Copyright © ${DateTime.now().toString().substring(0, 4)} Purslane Tech Pte. Ltd.\nCopyright © 2026 Shenzhen LeadCtrl Technology Co., Ltd.',
+                            'Copyright © 2026 Purslane Tech Pte. Ltd.\n'
+                            'Copyright © 2026 Shenzhen LeadCtrl Technology Co., Ltd.\n'
+                            'This software is based on RustDesk, licensed under AGPL‑3.0.\n'
+                            'Modified by Shenzhen LeadCtrl Technology Co., Ltd.',
                             style: const TextStyle(color: Colors.white),
+                          ),
+                          InkWell(
+                            onTap: () => launchUrlString(
+                                'https://github.com/along2506/rustdesk'),
+                            child: const Text(
+                              'Source code: https://github.com/along2506/rustdesk',
+                              style: TextStyle(
+                                color: Colors.white,
+                                decoration: TextDecoration.underline,
+                              ),
+                            ),
                           ),
                         ],
                       ),
