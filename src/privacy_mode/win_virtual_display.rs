@@ -31,6 +31,7 @@ pub(super) const PRIVACY_MODE_IMPL: &str = super::PRIVACY_MODE_IMPL_WIN_VIRTUAL_
 
 const CONFIG_KEY_REG_RECOVERY: &str = "reg_recovery";
 
+#[derive(Clone)]
 struct Display {
     dm: DEVMODEW,
     name: [WCHAR; 32],
@@ -43,6 +44,7 @@ pub struct PrivacyModeImpl {
     displays: Vec<Display>,
     virtual_displays: Vec<Display>,
     virtual_displays_added: Vec<u32>,
+    preserve_layout: bool,
 }
 
 struct TurnOnGuard<'a> {
@@ -82,6 +84,7 @@ impl PrivacyModeImpl {
             displays: Vec::new(),
             virtual_displays: Vec::new(),
             virtual_displays_added: Vec::new(),
+            preserve_layout: false,
         }
     }
 
@@ -335,6 +338,10 @@ impl PrivacyModeImpl {
     // 1. A new thread is created to handle the async privacy mode.
     // 2. The user is usually not in a hurry to turn on the privacy mode.
     pub fn ensure_virtual_display(&mut self, is_async_mode: bool) -> ResultType<()> {
+        if virtual_display_manager::is_amyuni_idd() {
+            self.preserve_layout = true;
+            return self.ensure_matching_virtual_displays();
+        }
         if self.virtual_displays.is_empty() {
             let displays =
                 virtual_display_manager::plug_in_peer_request(vec![Self::default_display_modes()])?;
@@ -361,6 +368,146 @@ impl PrivacyModeImpl {
             self.virtual_displays_added.extend(displays);
         }
 
+        Ok(())
+    }
+
+    fn ensure_matching_virtual_displays(&mut self) -> ResultType<()> {
+        // Keep the pre-transition physical configuration: hotplugging virtual
+        // monitors can itself rearrange the Windows desktop.
+        let physical = self.displays.clone();
+        let modes: Vec<_> = physical
+            .iter()
+            .map(|display| (display.dm.dmPelsWidth, display.dm.dmPelsHeight))
+            .collect();
+        virtual_display_manager::amyuni_idd::prepare_privacy_modes(&modes)?;
+        for expected in 1..=physical.len() {
+            virtual_display_manager::amyuni_idd::plug_in_privacy_monitor()?;
+            // Record ownership before polling so a timeout also removes the
+            // monitors created by this attempt.
+            self.virtual_displays_added.push(0);
+            let now = std::time::Instant::now();
+            loop {
+                self.set_displays();
+                self.displays = physical.clone();
+                if self.virtual_displays.len() == expected {
+                    break;
+                }
+                if now.elapsed() >= Duration::from_secs(5) {
+                    bail!("Timed out waiting for matching privacy displays.");
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+        self.displays.sort_by_key(|display| !display.primary);
+        // Validate all requested modes before any physical monitor is disabled.
+        for (physical, virtual_display) in self.displays.iter().zip(&self.virtual_displays) {
+            Self::matching_mode(physical, virtual_display)?;
+        }
+        Ok(())
+    }
+
+    fn matching_mode(physical: &Display, virtual_display: &Display) -> ResultType<DEVMODEW> {
+        let mut index = 0;
+        loop {
+            let mut dm: DEVMODEW = unsafe { std::mem::zeroed() };
+            dm.dmSize = std::mem::size_of::<DEVMODEW>() as _;
+            if unsafe { EnumDisplaySettingsW(virtual_display.name.as_ptr(), index, &mut dm) }
+                == FALSE
+            {
+                bail!(
+                    "Virtual display driver does not support {}x{}. Physical displays have not been replaced; restart the virtual display driver before retrying.",
+                    physical.dm.dmPelsWidth, physical.dm.dmPelsHeight
+                );
+            }
+            if dm.dmPelsWidth == physical.dm.dmPelsWidth
+                && dm.dmPelsHeight == physical.dm.dmPelsHeight
+            {
+                unsafe {
+                    dm.u1.s2_mut().dmPosition = physical.dm.u1.s2().dmPosition;
+                }
+                dm.dmFields |= DM_POSITION;
+                return Ok(dm);
+            }
+            index += 1;
+        }
+    }
+
+    fn apply_matching_layout(&self) -> ResultType<()> {
+        for (physical, virtual_display) in self.displays.iter().zip(&self.virtual_displays) {
+            let mut dm = Self::matching_mode(physical, virtual_display)?;
+            let flags = CDS_UPDATEREGISTRY
+                | CDS_NORESET
+                | if physical.primary { CDS_SET_PRIMARY } else { 0 };
+            let rc = unsafe {
+                ChangeDisplaySettingsExW(
+                    virtual_display.name.as_ptr(),
+                    &mut dm,
+                    NULL as _,
+                    flags,
+                    NULL,
+                )
+            };
+            if rc != DISP_CHANGE_SUCCESSFUL {
+                bail!(
+                    "Failed to preserve privacy display layout: {}",
+                    Self::change_display_settings_ex_err_msg(rc)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_matching_layout(&self) -> ResultType<()> {
+        let mut index = 0;
+        let mut active_virtual = 0;
+        loop {
+            let mut dd: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+            dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as _;
+            if unsafe { EnumDisplayDevicesW(std::ptr::null(), index, &mut dd, 0) } == FALSE {
+                break;
+            }
+            index += 1;
+            if dd.StateFlags & DISPLAY_DEVICE_ACTIVE != 0
+                && dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER == 0
+            {
+                if self
+                    .virtual_displays
+                    .iter()
+                    .any(|display| display.name == dd.DeviceName)
+                {
+                    active_virtual += 1;
+                } else {
+                    bail!("A non-privacy display is still active; privacy mode was not enabled.");
+                }
+            }
+        }
+        if active_virtual != self.displays.len() {
+            bail!("Windows did not activate all matching privacy displays.");
+        }
+        for (physical, virtual_display) in self.displays.iter().zip(&self.virtual_displays) {
+            let mut dm: DEVMODEW = unsafe { std::mem::zeroed() };
+            dm.dmSize = std::mem::size_of::<DEVMODEW>() as _;
+            let ok = unsafe {
+                EnumDisplaySettingsW(
+                    virtual_display.name.as_ptr(),
+                    ENUM_CURRENT_SETTINGS,
+                    &mut dm,
+                )
+            };
+            let same_position = unsafe {
+                dm.u1.s2().dmPosition.x == physical.dm.u1.s2().dmPosition.x
+                    && dm.u1.s2().dmPosition.y == physical.dm.u1.s2().dmPosition.y
+            };
+            if ok == FALSE
+                || dm.dmPelsWidth != physical.dm.dmPelsWidth
+                || dm.dmPelsHeight != physical.dm.dmPelsHeight
+                || !same_position
+            {
+                bail!(
+                    "Windows did not retain the requested privacy display resolution and position."
+                );
+            }
+        }
         Ok(())
     }
 
@@ -409,7 +556,7 @@ impl PrivacyModeImpl {
         let is_virtual_display_added = self.virtual_displays_added.len() > 0;
         if is_virtual_display_added {
             self.restore_plug_out_monitor();
-        } else {
+        } else if !self.preserve_layout {
             // https://github.com/rustdesk/rustdesk/pull/12114#issuecomment-2983054370
             // No virtual displays added, we need to change the display combination to force the display settings to be reloaded.
             // This function changes the user behavior of the virtual displays.
@@ -420,6 +567,7 @@ impl PrivacyModeImpl {
             // We can't replug the virtual dislays here.
             // TODO: plug out + plug in the virtual displays (`IDD_IMPL_AMYUNI`) in a short time makes the server side crash.
         }
+        self.preserve_layout = false;
     }
 
     fn restore_displays(displays: &[Display]) {
@@ -486,13 +634,19 @@ impl PrivacyMode for PrivacyModeImpl {
         let reg_connectivity_1 = reg_display_settings::read_reg_connectivity()?;
         let primary_display_name = guard.set_primary_display()?;
         guard.disable_physical_displays()?;
+        if guard.preserve_layout {
+            guard.apply_matching_layout()?;
+        }
         Self::commit_change_display(CDS_RESET)?;
-        // Explicitly set the resolution(virtual display) to 1920x1080.
-        allow_err!(crate::platform::change_resolution(
-            &primary_display_name,
-            1920,
-            1080
-        ));
+        if guard.preserve_layout {
+            guard.verify_matching_layout()?;
+        } else {
+            allow_err!(crate::platform::change_resolution(
+                &primary_display_name,
+                1920,
+                1080
+            ));
+        }
         let reg_connectivity_2 = reg_display_settings::read_reg_connectivity()?;
 
         if let Some(reg_recovery) =

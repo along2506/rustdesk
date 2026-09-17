@@ -14,6 +14,8 @@ on:
       - 'flutter/assets/logo*.png'
       - 'flutter/windows/runner/resources/app_icon.ico'
       - 'libs/portable/build.rs'
+      - 'src/privacy_mode/**'
+      - 'src/virtual_display_manager.rs'
       - 'flutter/lib/desktop/pages/desktop_setting_page.dart'
 
 permissions:
@@ -40,7 +42,7 @@ env:
   FLUTTER_WINDOWS_ARM_VERSION: "3.44.9"
   # for arm64 linux because official Dart SDK does not work
   FLUTTER_ELINUX_VERSION: "3.16.9"
-  TAG_NAME: "leadctrl-windows-r2-ci"
+  TAG_NAME: "leadctrl-windows-r3-privacy"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   # vcpkg version: 2026.07.29
   # If we change the `VCPKG COMMIT_ID`, please remember:
@@ -341,7 +343,7 @@ jobs:
           python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
           popd
           mkdir -p ./SignOutput
-          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/leadctrl-${{ env.VERSION }}-r2-${{ matrix.edition }}-${{ matrix.job.arch }}.exe
+          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/leadctrl-${{ env.VERSION }}-r3-${{ matrix.edition }}-${{ matrix.job.arch }}.exe
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
@@ -364,7 +366,7 @@ jobs:
           $msiPlatform = if ('${{ matrix.job.arch }}' -eq 'aarch64') { 'ARM64' } else { 'x64' }
           msbuild msi.sln -p:Configuration=Release -p:Platform=$msiPlatform /p:TargetVersion=Windows10
           $msi = Get-ChildItem ./Package/bin/*/Release/en-us/Package.msi | Select-Object -First 1
-          mv $msi.FullName ../../SignOutput/leadctrl-${{ env.VERSION }}-r2-${{ matrix.edition }}-${{ matrix.job.arch }}.msi
+          mv $msi.FullName ../../SignOutput/leadctrl-${{ env.VERSION }}-r3-${{ matrix.edition }}-${{ matrix.job.arch }}.msi
           sha256sum ../../SignOutput/leadctrl-*.msi
 
       - name: Sign rustdesk self-extracted file
@@ -376,7 +378,7 @@ jobs:
       - name: Upload LeadCtrl installers
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: leadctrl-r2-${{ matrix.edition }}-windows-x86_64-installers
+          name: leadctrl-r3-${{ matrix.edition }}-windows-x86_64-installers
           path: |
             ./SignOutput/leadctrl-*.msi
             ./SignOutput/leadctrl-*.exe

@@ -2522,7 +2522,7 @@ class _AboutState extends State<_About> {
       };
     }(), hasData: (data) {
       final version = data['version'].toString();
-      final edition = bind.isIncomingOnly() ? 'LeadCtrl 精简被控版 R2' : 'LeadCtrl 完整版 R2';
+      final edition = bind.isIncomingOnly() ? 'LeadCtrl 精简被控版 R3' : 'LeadCtrl 完整版 R3';
       final buildDate = data['buildDate'].toString();
       final fingerprint = data['fingerprint'].toString();
       final myId = data['myId'].toString();

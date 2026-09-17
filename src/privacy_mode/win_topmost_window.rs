@@ -18,7 +18,7 @@ use winapi::{
         libloaderapi::{GetModuleHandleA, GetProcAddress},
         memoryapi::{VirtualAllocEx, WriteProcessMemory},
         processthreadsapi::{
-            CreateProcessAsUserW, QueueUserAPC, ResumeThread, TerminateProcess,
+            CreateProcessAsUserW, GetExitCodeProcess, QueueUserAPC, ResumeThread, TerminateProcess,
             PROCESS_INFORMATION, STARTUPINFOW,
         },
         winbase::{WTSGetActiveConsoleSessionId, CREATE_SUSPENDED, DETACHED_PROCESS},
@@ -226,12 +226,17 @@ impl PrivacyModeImpl {
             .to_string();
 
         unsafe {
-            let cmd_utf16: Vec<u16> = cmdline.encode_utf16().chain(Some(0).into_iter()).collect();
+            let exe_utf16: Vec<u16> = cmdline.encode_utf16().chain(Some(0)).collect();
+            let mut cmd_utf16: Vec<u16> = format!("\"{}\"", cmdline)
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            let mut desktop: Vec<u16> = "winsta0\\default".encode_utf16().chain(Some(0)).collect();
 
             let mut start_info = STARTUPINFOW {
-                cb: 0,
+                cb: size_of::<STARTUPINFOW>() as _,
                 lpReserved: NULL as _,
-                lpDesktop: NULL as _,
+                lpDesktop: desktop.as_mut_ptr(),
                 lpTitle: NULL as _,
                 dwX: 0,
                 dwY: 0,
@@ -263,8 +268,8 @@ impl PrivacyModeImpl {
 
             let create_res = CreateProcessAsUserW(
                 token,
-                NULL as _,
-                cmd_utf16.as_ptr() as _,
+                exe_utf16.as_ptr(),
+                cmd_utf16.as_mut_ptr(),
                 NULL as _,
                 NULL as _,
                 FALSE,
@@ -308,9 +313,18 @@ impl PrivacyModeImpl {
             self.handlers.hthread = proc_info.hThread as _;
             self.handlers.hprocess = proc_info.hProcess as _;
 
-            if let Err(e) = wait_find_privacy_hwnds(PRIVACY_WINDOW_WAIT_MILLIS) {
+            if let Err(e) = wait_find_privacy_hwnds(5_000) {
+                let mut exit_code = 0;
+                let status = if GetExitCodeProcess(proc_info.hProcess, &mut exit_code) != 0 {
+                    format!(
+                        "broker exit/status code: 0x{:08x}, session: {}",
+                        exit_code, session_id
+                    )
+                } else {
+                    format!("cannot read broker status: {}", Error::last_os_error())
+                };
                 self.handlers.reset();
-                return Err(e);
+                bail!("{} ({})", e, status);
             }
         }
 

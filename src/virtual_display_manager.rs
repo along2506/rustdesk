@@ -659,6 +659,80 @@ pub mod amyuni_idd {
         plug_in_monitor_(true, is_async, None)
     }
 
+    // Amyuni documents up to ten custom modes under this key. Do not edit the
+    // signed INF: register the physical modes before creating privacy monitors.
+    pub fn prepare_privacy_modes(modes: &[(u32, u32)]) -> ResultType<()> {
+        use winreg::{enums::*, RegKey};
+
+        if modes.is_empty() || modes.len() > VIRTUAL_DISPLAY_MAX_COUNT {
+            bail!("Privacy mode supports between one and four physical displays.");
+        }
+        if get_monitor_count() != 0 {
+            bail!("Turn off existing virtual displays before enabling matching privacy displays.");
+        }
+        let mut is_async = false;
+        check_install_driver(&mut is_async)?;
+        let path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\usbmmIdd\Parameters\Monitors";
+        let now = Instant::now();
+        let key = loop {
+            match RegKey::predef(HKEY_LOCAL_MACHINE)
+                .open_subkey_with_flags(path, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)
+            {
+                Ok(key) => break key,
+                Err(_) if is_async && now.elapsed() < Duration::from_secs(5) => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
+        let mut values = Vec::new();
+        for &(width, height) in modes {
+            if width == 0 || height == 0 {
+                bail!("Invalid physical display resolution.");
+            }
+            let value = format!("{},{}", width, height);
+            if !values.contains(&value) {
+                values.push(value);
+            }
+        }
+        for i in 0..10 {
+            if let Ok(value) = key.get_value::<String, _>(i.to_string()) {
+                if !values.contains(&value) && values.len() < 10 {
+                    values.push(value);
+                }
+            }
+        }
+        for (i, value) in values.iter().enumerate() {
+            key.set_value(i.to_string(), value)?;
+        }
+        Ok(())
+    }
+
+    pub fn plug_in_privacy_monitor() -> ResultType<()> {
+        if get_monitor_count() >= VIRTUAL_DISPLAY_MAX_COUNT {
+            bail!("No free virtual display slots for privacy mode.");
+        }
+        // Unlike the headless path, do not launch a delayed 1080p reset that
+        // could overwrite the privacy layout after it has been verified.
+        let now = Instant::now();
+        loop {
+            match plug_monitor_(true, Some(Duration::from_secs(3))) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if let win_device::DeviceError::WinApiLastErr(_, error) = &e {
+                        if error.raw_os_error() == Some(ERROR_NO_MORE_ITEMS as _)
+                            && now.elapsed() < Duration::from_secs(3)
+                        {
+                            std::thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+    }
+
     // `index` the display index to plug out. -1 means plug out all.
     // `force_all` is used to forcibly plug out all virtual displays.
     // `force_one` is used to forcibly plug out one virtual display managed by other processes
