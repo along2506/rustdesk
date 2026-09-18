@@ -175,27 +175,50 @@ impl PrivacyModeImpl {
     }
 
     fn set_primary_display(&mut self) -> ResultType<String> {
-        // Multiple virtual displays with different origins are tested.
-        let display = &self.virtual_displays[0];
+        let primary_physical = self.displays.iter().find(|display| display.primary);
+        let display = if let Some(physical) = primary_physical {
+            if self.preserve_layout {
+                self.virtual_displays
+                    .iter()
+                    .find(|virtual_display| Self::matching_mode(physical, virtual_display).is_ok())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("No virtual display supports the physical primary display.")
+                    })?
+            } else {
+                &self.virtual_displays[0]
+            }
+        } else {
+            &self.virtual_displays[0]
+        };
         let display_name = std::string::String::from_utf16(&display.name)?;
 
-        #[allow(invalid_value)]
-        let mut new_primary_dm: DEVMODEW = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
-        new_primary_dm.dmSize = std::mem::size_of::<DEVMODEW>() as _;
-        new_primary_dm.dmDriverExtra = 0;
+        let mut new_primary_dm = if self.preserve_layout {
+            Self::matching_mode(
+                primary_physical.ok_or_else(|| anyhow::anyhow!("No physical primary display."))?,
+                display,
+            )?
+        } else {
+            #[allow(invalid_value)]
+            let mut dm: DEVMODEW = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+            dm.dmSize = std::mem::size_of::<DEVMODEW>() as _;
+            dm.dmDriverExtra = 0;
+            dm
+        };
         unsafe {
-            if FALSE
-                == EnumDisplaySettingsW(
-                    display.name.as_ptr(),
-                    ENUM_CURRENT_SETTINGS,
-                    &mut new_primary_dm,
-                )
-            {
-                bail!(
-                    "Failed EnumDisplaySettingsW, device name: {:?}, error: {}",
-                    std::string::String::from_utf16(&display.name),
-                    Error::last_os_error()
-                );
+            if !self.preserve_layout {
+                if FALSE
+                    == EnumDisplaySettingsW(
+                        display.name.as_ptr(),
+                        ENUM_CURRENT_SETTINGS,
+                        &mut new_primary_dm,
+                    )
+                {
+                    bail!(
+                        "Failed EnumDisplaySettingsW, device name: {:?}, error: {}",
+                        std::string::String::from_utf16(&display.name),
+                        Error::last_os_error()
+                    );
+                }
             }
 
             // Windows 24H2 requires the virtual display to be set first.
@@ -219,71 +242,77 @@ impl PrivacyModeImpl {
                     "Failed ChangeDisplaySettingsEx, the virtual display, {}",
                     &err
                 );
-                bail!("Failed ChangeDisplaySettingsEx, {}", err);
+                bail!("Failed to make privacy display primary, {}", err);
             }
 
-            let mut i: DWORD = 0;
-            loop {
-                #[allow(invalid_value)]
-                let mut dd: DISPLAY_DEVICEW = std::mem::MaybeUninit::uninit().assume_init();
-                dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as _;
-                if FALSE
-                    == EnumDisplayDevicesW(NULL as _, i, &mut dd, EDD_GET_DEVICE_INTERFACE_NAME)
-                {
-                    break;
-                }
-                i += 1;
-                if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0 {
-                    continue;
-                }
-                // Skip the virtual display.
-                if dd.DeviceName == display.name {
-                    continue;
-                }
+            if !self.preserve_layout {
+                let mut i: DWORD = 0;
+                loop {
+                    #[allow(invalid_value)]
+                    let mut dd: DISPLAY_DEVICEW = std::mem::MaybeUninit::uninit().assume_init();
+                    dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as _;
+                    if FALSE
+                        == EnumDisplayDevicesW(NULL as _, i, &mut dd, EDD_GET_DEVICE_INTERFACE_NAME)
+                    {
+                        break;
+                    }
+                    i += 1;
+                    if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0 {
+                        continue;
+                    }
+                    // Skip the virtual display.
+                    if dd.DeviceName == display.name {
+                        continue;
+                    }
 
-                #[allow(invalid_value)]
-                let mut dm: DEVMODEW = std::mem::MaybeUninit::uninit().assume_init();
-                dm.dmSize = std::mem::size_of::<DEVMODEW>() as _;
-                dm.dmDriverExtra = 0;
-                if FALSE
-                    == EnumDisplaySettingsW(dd.DeviceName.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm)
-                {
-                    bail!(
-                        "Failed EnumDisplaySettingsW, device name: {:?}, error: {}",
-                        std::string::String::from_utf16(&dd.DeviceName),
-                        Error::last_os_error()
-                    );
-                }
+                    #[allow(invalid_value)]
+                    let mut dm: DEVMODEW = std::mem::MaybeUninit::uninit().assume_init();
+                    dm.dmSize = std::mem::size_of::<DEVMODEW>() as _;
+                    dm.dmDriverExtra = 0;
+                    if FALSE
+                        == EnumDisplaySettingsW(
+                            dd.DeviceName.as_ptr(),
+                            ENUM_CURRENT_SETTINGS,
+                            &mut dm,
+                        )
+                    {
+                        bail!(
+                            "Failed EnumDisplaySettingsW, device name: {:?}, error: {}",
+                            std::string::String::from_utf16(&dd.DeviceName),
+                            Error::last_os_error()
+                        );
+                    }
 
-                dm.u1.s2_mut().dmPosition.x -= offx;
-                dm.u1.s2_mut().dmPosition.y -= offy;
-                dm.dmFields |= DM_POSITION;
-                let rc = ChangeDisplaySettingsExW(
-                    dd.DeviceName.as_ptr(),
-                    &mut dm,
-                    NULL as _,
-                    flags,
-                    NULL,
-                );
-                if rc != DISP_CHANGE_SUCCESSFUL {
-                    let err = Self::change_display_settings_ex_err_msg(rc);
-                    log::error!(
-                        "Failed ChangeDisplaySettingsEx, device name: {:?}, flags: {}, {}",
-                        std::string::String::from_utf16(&dd.DeviceName),
+                    dm.u1.s2_mut().dmPosition.x -= offx;
+                    dm.u1.s2_mut().dmPosition.y -= offy;
+                    dm.dmFields |= DM_POSITION;
+                    let rc = ChangeDisplaySettingsExW(
+                        dd.DeviceName.as_ptr(),
+                        &mut dm,
+                        NULL as _,
                         flags,
-                        &err
+                        NULL,
                     );
-                    bail!("Failed ChangeDisplaySettingsEx, {}", err);
-                }
+                    if rc != DISP_CHANGE_SUCCESSFUL {
+                        let err = Self::change_display_settings_ex_err_msg(rc);
+                        log::error!(
+                            "Failed ChangeDisplaySettingsEx, device name: {:?}, flags: {}, {}",
+                            std::string::String::from_utf16(&dd.DeviceName),
+                            flags,
+                            &err
+                        );
+                        bail!("Failed ChangeDisplaySettingsEx, {}", err);
+                    }
 
-                // If we want to set dpi, the following references may be helpful.
-                // And setting dpi should be called after changing the display settings.
-                // https://stackoverflow.com/questions/35233182/how-can-i-change-windows-10-display-scaling-programmatically-using-c-sharp
-                // https://github.com/lihas/windows-DPI-scaling-sample/blob/master/DPIHelper/DpiHelper.cpp
-                //
-                // But the official API does not provide a way to get/set dpi.
-                // https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ne-wingdi-displayconfig_device_info_type
-                // https://github.com/lihas/windows-DPI-scaling-sample/blob/738ac18b7a7ce2d8fdc157eb825de9cb5eee0448/DPIHelper/DpiHelper.h#L37
+                    // If we want to set dpi, the following references may be helpful.
+                    // And setting dpi should be called after changing the display settings.
+                    // https://stackoverflow.com/questions/35233182/how-can-i-change-windows-10-display-scaling-programmatically-using-c-sharp
+                    // https://github.com/lihas/windows-DPI-scaling-sample/blob/master/DPIHelper/DpiHelper.cpp
+                    //
+                    // But the official API does not provide a way to get/set dpi.
+                    // https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ne-wingdi-displayconfig_device_info_type
+                    // https://github.com/lihas/windows-DPI-scaling-sample/blob/738ac18b7a7ce2d8fdc157eb825de9cb5eee0448/DPIHelper/DpiHelper.h#L37
+                }
             }
         }
 
@@ -317,7 +346,11 @@ impl PrivacyModeImpl {
                         flags,
                         &err
                     );
-                    bail!("Failed ChangeDisplaySettingsEx, {}", err);
+                    bail!(
+                        "Failed to disable physical display {:?}, {}",
+                        std::string::String::from_utf16(&display.name),
+                        err
+                    );
                 }
             }
         }

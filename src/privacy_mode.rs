@@ -232,10 +232,10 @@ async fn turn_on_privacy_async(impl_key: String, conn_id: i32) -> Option<ResultT
         let res = turn_on_privacy_sync(&impl_key, conn_id);
         let _ = tx.send(res);
     });
-    // Wait at most 7.5 seconds for the result.
-    // Because it may take a long time to turn on the privacy mode with amyuni idd.
-    // Some laptops may take time to plug in a virtual display.
-    match hbb_common::timeout(7500, rx).await {
+    // A four-monitor Amyuni layout can take several seconds per monitor while
+    // Windows applies the topology. The privacy implementation still verifies
+    // the result before reporting success.
+    match hbb_common::timeout(30_000, rx).await {
         Ok(res) => match res {
             Ok(res) => res,
             Err(e) => Some(Err(anyhow!(e.to_string()))),
