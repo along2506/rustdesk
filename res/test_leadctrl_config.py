@@ -16,6 +16,7 @@ class BuildConfigTests(unittest.TestCase):
             "LEADCTRL_SERVER": "relay.example.invalid",
             "LEADCTRL_PUBLIC_KEY": base64.b64encode(bytes(range(32))).decode(),
         }
+        self.unattended_password = "test-unattended-password"
 
     def test_missing_and_invalid_config_is_rejected_without_echoing_values(self):
         cases = [{}, {"LEADCTRL_SERVER": self.values["LEADCTRL_SERVER"]}]
@@ -32,6 +33,15 @@ class BuildConfigTests(unittest.TestCase):
                 for value in values.values():
                     self.assertNotIn(value, str(error.exception))
 
+    def test_android_unattended_password_is_required(self):
+        for value in ("", "too-short", "contains\nnewline"):
+            with self.subTest(value=value), patch.dict(
+                    os.environ, {"LEADCTRL_UNATTENDED_PASSWORD": value}, clear=True):
+                with self.assertRaises(ValueError) as error:
+                    customize.read_unattended_password()
+                if value:
+                    self.assertNotIn(value, str(error.exception))
+
     def test_both_editions_on_pinned_sources(self):
         config_source = Path(os.environ.get(
             "LEADCTRL_TEST_CONFIG_SOURCE",
@@ -39,7 +49,7 @@ class BuildConfigTests(unittest.TestCase):
         )).read_text(encoding="utf-8")
         windows_source = (customize.ROOT / "src/platform/windows.rs").read_text(encoding="utf-8")
         client_source = (customize.ROOT / "src/client.rs").read_text(encoding="utf-8")
-        for edition in ("full", "lite"):
+        for edition in ("full", "lite", "android"):
             with self.subTest(edition=edition), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 sources = {
@@ -47,14 +57,27 @@ class BuildConfigTests(unittest.TestCase):
                     "src/platform/windows.rs": windows_source,
                     "src/client.rs": client_source,
                 }
+                if edition == "android":
+                    for path in (
+                        "flutter/android/app/build.gradle",
+                        "flutter/android/app/src/main/AndroidManifest.xml",
+                        "flutter/android/app/src/main/res/values/strings.xml",
+                        "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt",
+                        "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt",
+                        "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt",
+                    ):
+                        sources[path] = (customize.ROOT / path).read_text(encoding="utf-8")
                 for path, source in sources.items():
                     destination = root / path
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_text(source, encoding="utf-8")
                 output = io.StringIO()
-                with patch.dict(os.environ, self.values, clear=True), contextlib.redirect_stdout(output):
+                values = dict(self.values)
+                if edition == "android":
+                    values["LEADCTRL_UNATTENDED_PASSWORD"] = self.unattended_password
+                with patch.dict(os.environ, values, clear=True), contextlib.redirect_stdout(output):
                     customize.customize(root, edition)
-                for value in self.values.values():
+                for value in values.values():
                     self.assertNotIn(value, output.getvalue())
                 config = (root / "libs/hbb_common/src/config.rs").read_text(encoding="utf-8")
                 for value in self.values.values():
@@ -62,14 +85,20 @@ class BuildConfigTests(unittest.TestCase):
                 self.assertIn('("hide-server-settings".to_owned(), "Y".to_owned())', config)
                 incoming = '("conn-type".to_owned(), "incoming".to_owned())'
                 client = (root / "src/client.rs").read_text(encoding="utf-8")
-                if edition == "lite":
+                if edition in ("lite", "android"):
                     self.assertIn(incoming, config)
                     self.assertNotIn('if config::is_incoming_only() && !is_switch_sides_back', client)
                 else:
                     self.assertNotIn(incoming, config)
                     self.assertEqual(client, client_source)
+                if edition == "android":
+                    self.assertIn(self.unattended_password, config)
+                    self.assertIn('applicationId "cn.leadctrl.remoteassist"',
+                                  (root / "flutter/android/app/build.gradle").read_text(encoding="utf-8"))
+                    self.assertIn('getBoolean(KEY_START_ON_BOOT_OPT, true)',
+                                  (root / "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt").read_text(encoding="utf-8"))
                 before = (root / "libs/hbb_common/src/config.rs").read_bytes()
-                with patch.dict(os.environ, self.values, clear=True):
+                with patch.dict(os.environ, values, clear=True):
                     with self.assertRaises(RuntimeError):
                         customize.customize(root, edition)
                 self.assertEqual(before, (root / "libs/hbb_common/src/config.rs").read_bytes())

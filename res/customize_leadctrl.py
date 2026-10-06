@@ -2,6 +2,7 @@
 
 import base64
 import argparse
+import json
 import os
 import re
 from pathlib import Path
@@ -17,7 +18,8 @@ def replace_once(source, old, new):
 
 def settings_initializer(name, values):
     entries = '\n'.join(
-        f'            ("{key}".to_owned(), "{value}".to_owned()),'
+        f'            ({json.dumps(key, ensure_ascii=False)}.to_owned(), '
+        f'{json.dumps(value, ensure_ascii=False)}.to_owned()),'
         for key, value in values.items()
     )
     return (f'pub static ref {name}: RwLock<HashMap<String, String>> = '
@@ -40,10 +42,18 @@ def read_build_config():
     return server, public_key
 
 
+def read_unattended_password():
+    password = os.environ.get("LEADCTRL_UNATTENDED_PASSWORD", "")
+    if not 10 <= len(password) <= 64 or any(ord(char) < 32 for char in password):
+        raise ValueError("LEADCTRL_UNATTENDED_PASSWORD must contain 10-64 printable characters")
+    return password
+
+
 def customize(root=ROOT, edition="full"):
-    if edition not in ("full", "lite"):
+    if edition not in ("full", "lite", "android"):
         raise ValueError("Unknown client edition")
     SERVER, PUBLIC_KEY = read_build_config()
+    unattended_password = read_unattended_password() if edition == "android" else ""
 
     config_path = root / "libs/hbb_common/src/config.rs"
     config = config_path.read_text(encoding="utf-8")
@@ -57,17 +67,29 @@ def customize(root=ROOT, edition="full"):
         "hide-server-settings": "Y",
         "allow-deep-link-server-settings": "N",
     }
-    if edition == "lite":
+    if edition in ("lite", "android"):
         builtin.update({key: "Y" for key in (
             "hide-general-settings", "hide-security-settings",
             "hide-network-settings", "hide-remote-printer-settings",
         )})
+        if edition == "android":
+            builtin.update({
+                "disable-change-permanent-password": "Y",
+                "remove-preset-password-warning": "Y",
+            })
+        hard_settings = {
+            "conn-type": "incoming", "disable-account": "Y", "disable-ab": "Y",
+        }
+        if edition == "android":
+            hard_settings.update({
+                "approve-mode": "password",
+                "verification-method": "use-permanent-password",
+                "password": unattended_password,
+            })
         config = replace_once(
             config,
             'pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();',
-            settings_initializer("HARD_SETTINGS", {
-                "conn-type": "incoming", "disable-account": "Y", "disable-ab": "Y",
-            }),
+            settings_initializer("HARD_SETTINGS", hard_settings),
         )
     config = replace_once(
         config,
@@ -113,7 +135,7 @@ def customize(root=ROOT, edition="full"):
 
     client_path = root / "src/client.rs"
     client = None
-    if edition == "lite":
+    if edition in ("lite", "android"):
         client = replace_once(
             client_path.read_text(encoding="utf-8"),
             'if config::is_incoming_only() && !is_switch_sides_back(conn_type, &interface).await {',
@@ -125,12 +147,67 @@ def customize(root=ROOT, edition="full"):
     windows_path.write_text(windows, encoding="utf-8")
     if client is not None:
         client_path.write_text(client, encoding="utf-8")
+
+    if edition == "android":
+        android_root = root / "flutter/android/app"
+
+        gradle_path = android_root / "build.gradle"
+        gradle = replace_once(
+            gradle_path.read_text(encoding="utf-8"),
+            'applicationId "com.carriez.flutter_hbb"',
+            'applicationId "cn.leadctrl.remoteassist"',
+        )
+
+        manifest_path = android_root / "src/main/AndroidManifest.xml"
+        manifest = manifest_path.read_text(encoding="utf-8")
+        manifest = replace_once(manifest, 'android:label="RustDesk"', 'android:label="@string/app_name"')
+        manifest = replace_once(
+            manifest,
+            'android:label="RustDesk Input"',
+            'android:label="LeadCtrl 远程控制"',
+        )
+
+        strings_path = android_root / "src/main/res/values/strings.xml"
+        strings = strings_path.read_text(encoding="utf-8")
+        strings = replace_once(strings, '<string name="app_name">RustDesk</string>',
+                               '<string name="app_name">LeadCtrl 远程协助</string>')
+        strings = strings.replace("RustDesk", "LeadCtrl")
+
+        kotlin_root = android_root / "src/main/kotlin/com/carriez/flutter_hbb"
+        boot_path = kotlin_root / "BootReceiver.kt"
+        boot = boot_path.read_text(encoding="utf-8")
+        boot = replace_once(boot, 'getBoolean(KEY_START_ON_BOOT_OPT, false)',
+                            'getBoolean(KEY_START_ON_BOOT_OPT, true)')
+        boot = replace_once(boot, '"RustDesk is Open"', '"LeadCtrl 远程协助已启动"')
+
+        activity_path = kotlin_root / "MainActivity.kt"
+        activity = replace_once(
+            activity_path.read_text(encoding="utf-8"),
+            'getBoolean(KEY_START_ON_BOOT_OPT, false)',
+            'getBoolean(KEY_START_ON_BOOT_OPT, true)',
+        )
+
+        service_path = kotlin_root / "MainService.kt"
+        service = service_path.read_text(encoding="utf-8")
+        service = replace_once(service, 'const val DEFAULT_NOTIFY_TITLE = "RustDesk"',
+                               'const val DEFAULT_NOTIFY_TITLE = "LeadCtrl 远程协助"')
+        service = replace_once(service, 'val channelId = "RustDesk"',
+                               'val channelId = "LeadCtrlRemoteAssist"')
+        service = replace_once(service, 'val channelName = "RustDesk Service"',
+                               'val channelName = "LeadCtrl 远程协助服务"')
+
+        gradle_path.write_text(gradle, encoding="utf-8")
+        manifest_path.write_text(manifest, encoding="utf-8")
+        strings_path.write_text(strings, encoding="utf-8")
+        boot_path.write_text(boot, encoding="utf-8")
+        activity_path.write_text(activity, encoding="utf-8")
+        service_path.write_text(service, encoding="utf-8")
     print("LeadCtrl configuration embedded and locked; edition:", edition)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--edition", choices=("full", "lite"), default="full")
+    parser.add_argument("--edition", choices=("full", "lite", "android"), default="full")
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
     if args.validate_only:
